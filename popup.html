@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Grading Study Logger</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Grading Study Logger</h1>
+        <p class="subtle">Logs Gradescope grading activity automatically. Files are saved to Downloads/grading-study/ when the session ends.</p>
+      </header>
+
+      <section id="setup" class="card">
+        <label>Study participant code <input id="participant" type="text" maxlength="40" autocomplete="off" placeholder="e.g. TF-014"></label>
+        <p class="subtle">You can also start, pause and end sessions from the study box on any Gradescope grading page, so you don't need this menu while grading.</p>
+        <button id="startSession" class="primary wide">Start session</button>
+      </section>
+
+      <section id="active" class="card" hidden>
+        <div class="status-row"><span id="status" class="badge">Logging</span><span id="sessionTimer" class="timer">00:00</span></div>
+        <dl class="facts">
+          <dt>Current answer</dt><dd id="current">—</dd>
+          <dt>Answers visited</dt><dd id="seen">0</dd>
+          <dt>Screen recording</dt><dd id="recording">Off</dd>
+        </dl>
+        <button id="openRecorder" class="wide">Open screen recorder</button>
+        <div class="button-grid">
+          <button id="pause">Take a break</button>
+          <button id="mark">Mark moment</button>
+        </div>
+        <input id="markNote" type="text" maxlength="200" autocomplete="off" placeholder="Optional note for Mark moment">
+        <button id="endSession" class="finish">End session</button>
+      </section>
+
+      <details id="calibrate" class="card">
+        <summary>Calibrate page regions</summary>
+        <p class="subtle">Usually not needed: AI feedback sections and the CONFIRMED / NOT CONFIRMED rubric items are found automatically. Use Check current page to confirm. To set a region by hand, open a grading page, click Pick, then click that region on the page (↑ selects the parent element, Esc cancels).</p>
+        <div id="regions"></div>
+        <button id="probe" class="wide">Check current page</button>
+        <p id="probeResult" class="subtle probe"></p>
+      </details>
+
+      <section class="card">
+        <div class="log-heading"><h2>Data</h2><span id="eventCount" class="subtle"></span></div>
+        <div class="button-grid">
+          <button id="export" class="primary">Export logs now</button>
+          <button id="clear">Clear logs</button>
+        </div>
+      </section>
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+    </main>
+    <script src="config.js"></script>
+    <script src="summary.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

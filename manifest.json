@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Grading Study Logger",
+  "version": "0.5.0",
+  "description": "Automatically logs Gradescope grading interactions and records the screen for a grading study.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "unlimitedStorage", "idle", "downloads"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.gradescope.com/*"],
+      "js": ["config.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Grading Study Logger",
+    "default_popup": "popup.html"
+  }
+}

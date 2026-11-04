@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Study screen recorder</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body class="page">
+    <main>
+      <header>
+        <h1>Study screen recorder</h1>
+        <p class="subtle">Keep this pinned tab open while you grade. One video covers the whole session (breaks pause it). When the session ends, the video and the log files are saved to Downloads/grading-study/ and the temporary pieces kept in the browser are deleted. Nothing is uploaded.</p>
+      </header>
+      <section class="card">
+        <div class="status-row"><span id="status" class="badge idle">Not recording</span><span id="elapsed" class="timer"></span></div>
+        <p class="subtle">Click <b>Start recording</b>, choose <b>Entire screen</b>, then <b>Share</b>. You are taken back to Gradescope automatically. Use the box on the Gradescope page for breaks and to end the session.</p>
+        <div class="button-grid">
+          <button id="start" class="primary">Start recording</button>
+          <button id="stop" disabled>Stop recording</button>
+        </div>
+      </section>
+      <section class="card">
+        <h2>Saved recordings</h2>
+        <p id="empty" class="subtle">None yet.</p>
+        <ul id="recordings" class="recordings"></ul>
+      </section>
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+    </main>
+    <script src="summary.js"></script>
+    <script src="recorder.js"></script>
+  </body>
+</html>
