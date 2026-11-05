@@ -1,5 +1,6 @@
 // Single writer for the event log. Content scripts, the popup and the recorder tab all send
 // messages here so events are appended in one place and in order.
+importScripts("config.js");
 const IDLE_SECONDS = 120;
 let state = null;
 let ready = null;
@@ -21,12 +22,18 @@ function scheduleSave() { saveTimer ??= setTimeout(persist, 1000); }
 function publishStatus() {
   return chrome.storage.local.set({ studyStatus: {
     active: Boolean(state.sessionActive), paused: Boolean(state.paused),
-    recording: Boolean(state.recording && !state.recording.paused), participant: state.participant ?? ""
+    recording: Boolean(state.recording && !state.recording.paused), graderId: state.graderId ?? ""
   } });
 }
 function addEvent(type, data = {}) {
   const t = Date.now();
-  state.events.push({ t, ts: new Date(t).toISOString(), sessionId: state.sessionId ?? null, type, ...data });
+  state.events.push({ t, ts: new Date(t).toISOString(), graderId: state.graderId ?? null, sessionId: state.sessionId ?? null, type, ...data });
+}
+// Downloads/grading-study/grader-<ID>/<local start date>_<time>/ holds everything from one session.
+function sessionFolder(graderId, start) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamp = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}_${pad(start.getHours())}-${pad(start.getMinutes())}-${pad(start.getSeconds())}`;
+  return `grading-study/grader-${graderId.replace(/[^\w-]+/g, "_")}/${stamp}`;
 }
 function broadcast(kind) { chrome.runtime.sendMessage({ kind }).catch(() => {}); }
 
@@ -49,24 +56,31 @@ async function openRecorder({ returnTab = null, ended = false, focus = true } = 
 
 const handlers = {
   getState: () => ({
-    sessionActive: Boolean(state.sessionActive), paused: Boolean(state.paused), participant: state.participant ?? "",
+    sessionActive: Boolean(state.sessionActive), paused: Boolean(state.paused), graderId: state.graderId ?? "",
     startedAt: state.startedAt ?? null,
     current: state.current ?? null, submissionsSeen: state.submissionsSeen?.length ?? 0, recording: state.recording ?? null,
-    eventCount: state.events.length
+    eventCount: state.events.length, sessionFolder: state.sessionFolder ?? null, lastGradescopeTab: state.lastGradescopeTab ?? null
   }),
 
   flush: () => persist().then(() => ({ ok: true })),
 
-  async startSession({ participant }, sender) {
+  seenGradescope: (_msg, sender) => { state.lastGradescopeTab = sender.tab?.id ?? state.lastGradescopeTab; return { ok: true }; },
+
+  async startSession({ graderId }, sender) {
+    const error = graderIdError(graderId);
+    if (error) return { error };
+    graderId = normalizeGraderId(graderId);
     if (state.sessionActive) return { error: "A session is already active." };
     Object.assign(state, {
-      sessionActive: true, sessionId: crypto.randomUUID(), participant, captureText: true,
+      sessionActive: true, sessionId: crypto.randomUUID(), graderId, captureText: true,
       startedAt: new Date().toISOString(), paused: false, current: null, recording: null, submissionsSeen: []
     });
-    addEvent("session_started", { participant, extensionVersion: chrome.runtime.getManifest().version, userAgent: navigator.userAgent });
+    state.sessionFolder = sessionFolder(graderId, new Date(state.startedAt));
+    addEvent("session_started", { graderId, sessionFolder: state.sessionFolder, extensionVersion: chrome.runtime.getManifest().version, userAgent: navigator.userAgent });
     await persist(); await publishStatus();
-    await chrome.storage.local.remove("checkins");
-    await openRecorder({ returnTab: sender.tab?.id ?? null });
+    await chrome.storage.local.remove(["studyAnswers", "studyEntryMs"]);
+    const fromGradescope = sender.tab && /^https:\/\/([\w-]+\.)?gradescope\.com\//.test(sender.url ?? "");
+    await openRecorder({ returnTab: fromGradescope ? sender.tab.id : state.lastGradescopeTab ?? null });
     return { ok: true };
   },
 
@@ -108,6 +122,7 @@ const handlers = {
     if (!isRecording && (!state.sessionActive || state.paused)) return { logged: false };
     const tabId = sender.tab?.id ?? null;
     if (event.type === "page_context") {
+      state.lastGradescopeTab = tabId;
       const key = event.key ?? null;
       if (key === (state.current?.key ?? null) && (!key || tabId === state.current.tabId)) return { logged: false };
       state.current = key ? { key, tabId, since: Date.now() } : null;
@@ -126,12 +141,13 @@ const handlers = {
   },
 
   openRecorder: () => openRecorder().then(() => ({ ok: true })),
+  openTutorial: () => chrome.tabs.create({ url: chrome.runtime.getURL("tutorial.html") }).then(() => ({ ok: true })),
 
   async clear() {
     if (state.sessionActive) return { error: "End the session before clearing logs." };
-    state = { sessionActive: false, events: [], participant: state.participant };
+    state = { sessionActive: false, events: [], graderId: state.graderId };
     await persist();
-    await chrome.storage.local.remove("checkins");
+    await chrome.storage.local.remove(["studyAnswers", "studyEntryMs"]);
     return { ok: true };
   }
 };
@@ -141,6 +157,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (!handler) return false;
   load().then(() => handler(msg, sender)).then(reply, (err) => reply({ error: String(err) }));
   return true;
+});
+
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  if (reason === "install") chrome.tabs.create({ url: chrome.runtime.getURL("tutorial.html") });
 });
 
 chrome.idle.setDetectionInterval(IDLE_SECONDS);

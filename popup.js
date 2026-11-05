@@ -31,6 +31,7 @@ function render() {
   $("sessionTimer").textContent = clock(Date.now() - Date.parse(view.startedAt));
   $("current").textContent = view.current ? `${view.current.key} · ${clock(Date.now() - view.current.since)}` : "Not on an answer";
   $("seen").textContent = view.submissionsSeen;
+  $("graderShown").textContent = view.graderId;
   const rec = view.recording;
   $("recording").textContent = !rec ? "Off" : !view.recorderOpen ? "Interrupted (recorder tab closed)"
     : rec.paused ? "Paused" : `On since ${new Date(rec.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
@@ -70,12 +71,14 @@ async function buildRegions() {
 }
 
 $("startSession").addEventListener("click", async () => {
-  const participant = $("participant").value.trim();
-  if (!participant) return notice("Enter the participant code assigned by the study team.");
-  const result = await send("startSession", { participant });
+  const graderId = $("graderId").value;
+  const error = graderIdError(graderId);
+  if (error) return notice(error);
+  const result = await send("startSession", { graderId });
   if (result?.error) return notice(result.error);
 });
 $("openRecorder").addEventListener("click", () => send("openRecorder"));
+$("tutorial").addEventListener("click", () => send("openTutorial"));
 $("pause").addEventListener("click", async () => { await send(view.paused ? "resume" : "pause"); refresh(); });
 $("mark").addEventListener("click", async () => {
   await send("mark", { note: $("markNote").value.trim() });
@@ -96,9 +99,14 @@ $("probe").addEventListener("click", async () => {
     const rubric = result.rubric.map((i) => `[${i.applied === null ? "state unreadable" : i.applied ? "APPLIED" : "off"}] ${i.points ?? ""} ${i.text} → ${i.category ?? "no verdict category"}`);
     parts.unshift(`Question: ${result.question ? `${result.question.number}: ${result.question.title}` : "title not found"}`,
       `Autograder Results: ${result.aiResults}`, `AI sections: ${result.sections.length ? result.sections.join(", ") : "none found (expand Autograder Results)"}`);
+    const { contentError } = await chrome.storage.local.get("contentError");
+    parts.unshift(`Extension ${chrome.runtime.getManifest().version} · page script ${result.version} · study bar ${result.barShown ? "showing" : "NOT showing"}`);
+    if (contentError) parts.push(`Last page error (${contentError.at}, ${contentError.where}, v${contentError.version}, ${contentError.page}): ${contentError.message}`);
     parts.push(`Comment boxes: ${result.commentBoxes}`, `Answer: ${result.key ?? "not a grading page"}`, `Rubric items (${rubric.length}):`, ...rubric);
     $("probeResult").textContent = parts.join("\n");
-  } catch { $("probeResult").textContent = "Open (or reload) a Gradescope page in this tab first."; }
+  } catch {
+    $("probeResult").textContent = `The study script isn't running in this tab (extension ${chrome.runtime.getManifest().version}). Open a Gradescope course page and reload it (Ctrl+R / Cmd+R), then check again.`;
+  }
 });
 
 $("export").addEventListener("click", async () => {
@@ -115,8 +123,9 @@ $("clear").addEventListener("click", async () => {
 });
 
 (async () => {
+  $("version").textContent = `v${chrome.runtime.getManifest().version}`;
   await refresh();
-  $("participant").value = view.participant;
+  $("graderId").value = view.graderId;
   await buildRegions();
   setInterval(refresh, 1000);
 })();

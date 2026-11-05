@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Grading study: how it works</title>
+    <link rel="stylesheet" href="popup.css">
+    <style>
+      body.page { max-width: 760px; padding: 0 16px 40px; }
+      h1 { font-size: 22px; margin: 24px 0 4px; }
+      h2 { font-size: 16px; margin: 0 0 8px; }
+      ol, ul { padding-left: 20px; margin: 6px 0; }
+      li { margin: 5px 0; }
+      .demo { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 10px; background: #202124; color: #e8eaed; font-size: 12px; margin: 10px 0 6px; }
+      .demo .dot { width: 9px; height: 9px; border-radius: 50%; background: #f28b82; display: inline-block; margin-right: 4px; }
+      .demo .sep { width: 1px; align-self: stretch; background: #5f6368; }
+      .demo .clock { font-weight: 700; font-size: 14px; color: #fff; }
+      .demo .muted { color: #9aa0a6; }
+      .demo .btn { border: 1px solid #5f6368; background: #3c4043; border-radius: 6px; padding: 3px 8px; }
+      .demo .btn.on { background: #8ab4f8; border-color: #8ab4f8; color: #202124; font-weight: 600; }
+      .demo .btn.end { background: #c5221f; border-color: #c5221f; color: #fff; }
+      .legend { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 13px; }
+      .legend dt { font-weight: 600; }
+      .legend dd { margin: 0; }
+      .rule { background: #fef7e0; border-radius: 8px; padding: 8px 10px; }
+    </style>
+  </head>
+  <body class="page">
+    <h1>Grading study: how it works</h1>
+    <p class="subtle">Thank you for taking part. This takes about two minutes to read.</p>
+
+    <section class="card">
+      <h2>What the study is about</h2>
+      <p>Each answer on Gradescope already has AI-generated feedback under <b>Autograder Results</b>. Your job is the usual one: check the student's work, apply the rubric, and add comments, using the AI feedback however you find useful. The study measures how long grading takes and how graders use the AI feedback. A study bar on the grading page does almost all of the record-keeping.</p>
+    </section>
+
+    <section class="card">
+      <h2>The study bar</h2>
+      <div class="demo" aria-hidden="true">
+        <span class="muted">⋮⋮</span><span><span class="dot"></span>REC</span><span class="sep"></span>
+        <b>Q3.1 Show reduction</b><span class="clock">02:31</span><span class="muted">question total 1:12:05</span><span class="sep"></span>
+        <span>AI use:</span><span class="btn on">Kept as-is</span><span class="btn">Edited it</span><span class="btn">Didn't use</span>
+        <span class="btn">Skip ⏭</span><span class="sep"></span><span class="btn">⏸ Pause</span><span class="btn end">■ End</span><span class="btn">?</span>
+      </div>
+      <dl class="legend">
+        <dt>REC</dt><dd>Your screen is being recorded for this session.</dd>
+        <dt>Q3.1 · 02:31</dt><dd>The question you're grading and the time on this student's answer. "Question total" adds up all answers to this question.</dd>
+        <dt>AI use</dt><dd><b>Kept as-is</b>: you left the AI's feedback and grade unchanged. <b>Edited it</b>: you changed the AI's grade or feedback in any way, including corrections or added comments. <b>Didn't use</b>: you graded without the AI feedback.</dd>
+        <dt>Skip ⏭</dt><dd>Leave this answer for now and come back to it later.</dd>
+        <dt>⏸ Pause</dt><dd>Stops the timer and the recording, and hides the page while you're away.</dd>
+        <dt>■ End</dt><dd>Ends the session and saves your files.</dd>
+        <dt>⋮⋮ and –</dt><dd>Drag the bar anywhere; minimize it to a smaller strip.</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Each session</h2>
+      <ol>
+        <li>Open any Gradescope grading page. In the study bar, paste your <b>grader ID</b> (from the study team) and click <b>Start session</b>. You only need to paste it the first time; it's remembered after that, and shown on the bar as "Grader 1a2b3c4d".</li>
+        <li>A recorder tab opens. Click <b>Start recording</b>, choose <b>Entire screen</b>, and click <b>Share</b>. You're returned to Gradescope.</li>
+        <li>Grade as usual. Timing is automatic: it starts when you open a student's answer to a question and stops when you move on or return to the question list. For every answer: apply the rubric, add comments, then press one <b>AI use</b> button. Then click <b>Next</b> or <b>Next Ungraded</b>.</li>
+        <li>Walking away? Press <b>⏸ Pause</b>, then <b>Resume grading</b> when you're back.</li>
+        <li>Done for now? Press <b>■ End</b> twice. Your files are saved to <b>Downloads/grading-study/</b>. Upload that folder to the study drive.</li>
+      </ol>
+      <p class="rule">You can't move to another answer until you've pressed an AI-use button or <b>Skip</b>. If you leave an answer some other way, the bar asks about it on the next page.</p>
+    </section>
+
+    <section class="card">
+      <h2>Privacy</h2>
+      <ul>
+        <li>Recordings and logs stay on your computer until you upload them to the study drive. Nothing is sent anywhere automatically.</li>
+        <li>Close unrelated windows and personal tabs before sharing your screen.</li>
+        <li>Pause whenever you step away. The recording stops, and the student work on screen is hidden.</li>
+      </ul>
+      <p class="subtle">You can reopen this page any time with the <b>?</b> button on the study bar. Don't see the bar? Reload the Gradescope tab.</p>
+    </section>
+  </body>
+</html>

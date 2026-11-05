@@ -1,14 +1,13 @@
-// Runs on Gradescope grading pages. Shows the floating study box (start / check-in / break / end)
-// and, while a session is active, records only what the study's measures need (see README
-// "Data collected"): which question and answer is open and for how long, the AI feedback shown,
-// the rubric items applied, the grader's comment, engagement with the AI feedback, and the
-// per-answer check-in.
+// Runs on Gradescope grading pages. Shows the study bar (recording state, per-answer timer, AI-use
+// buttons, Skip, Pause, End) and, while a session is active, records what the study's measures
+// need (see README "Data collected"). An "answer" is one student's submission for one question;
+// each has its own Gradescope URL and is the unit every measure is recorded for.
 const EDITABLE = "textarea, [contenteditable=''], [contenteditable='true']";
 const NAV_TEXT = /^(next|previous)( ungraded)?$/i;
 const APPLIED_CLASS = /(--applied|is-applied|\bapplied\b|\bselected\b|\bchecked\b|is-active)/i;
 const POINTS = /([+-]?\s?\d+(?:\.\d+)?)\s*(?:Points|pts)\b/i;
 const ATTENTION_IDLE_MS = 120_000;
-let status = { active: false, paused: false, recording: false, participant: "" };
+let status = { active: false, paused: false, recording: false, graderId: "" };
 let selectors = { ...DEFAULT_SELECTORS };
 let ctx = parseContext();
 let hover = { region: null, section: null };
@@ -22,9 +21,13 @@ let aiSeenKey = null;
 let questionSentKey = null;
 let cache = {};
 let picking = null;
-let checkins = {};       // answer key -> { usage, helpful, wrongSections }
 let toggles = {};        // answer key -> { category: on/off } replayed from clicks when the page state is unreadable
-let nudgedKey = null;
+// Per-answer study state, shared across tabs and page loads through chrome.storage.local.
+let answers = {};        // answer key -> { usage, skipped }
+let entryMs = {};        // answer key -> active ms on that answer (shown on the bar)
+let pending = [];        // answers left without an AI-use answer by a route the bar couldn't block
+let lastEntry = null;    // the answer most recently open
+let leaving = false;     // set when the bar itself sends the grader on, so the leave guard stays quiet
 
 const logging = () => status.active && !status.paused;
 function freshAttention() { return { aiVisibleMs: 0, commentFocusMs: 0, scrollPx: 0, hoverMs: {}, sectionHoverMs: {} }; }
@@ -33,6 +36,17 @@ function send(type, data = {}) {
   if (!logging()) return;
   try { chrome.runtime.sendMessage({ kind: "log", event: { type, key: ctx.key, ...data } }).catch(() => {}); }
   catch { /* extension was reloaded; this page needs a refresh */ }
+}
+// Keeps the last failure where the popup's "Check current page" can show it.
+let lastErrorAt = 0;
+function reportError(where, err) {
+  console.error("[grading study]", where, err);
+  if (Date.now() - lastErrorAt < 10_000) return;
+  lastErrorAt = Date.now();
+  chrome.storage.local.set({ contentError: {
+    where, message: String(err?.message ?? err), stack: String(err?.stack ?? "").slice(0, 800),
+    page: location.pathname, at: new Date().toISOString(), version: chrome.runtime.getManifest().version
+  } }).catch(() => {});
 }
 function command(kind, data = {}) {
   try { return chrome.runtime.sendMessage({ kind, ...data }); }
@@ -62,7 +76,7 @@ function cached(name, compute) {
 }
 function* textNodes() {
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => (cardHost.contains(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
+    acceptNode: (n) => (barHost.contains(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
   });
   for (let node = walker.nextNode(); node; node = walker.nextNode()) yield node;
 }
@@ -84,7 +98,7 @@ function aiSections() {
     const found = [];
     for (const el of document.querySelectorAll("div, section, article, li, details, tr")) {
       const head = el.firstElementChild;
-      if (!head || head.childElementCount > 10 || cardHost.contains(el)) continue;
+      if (!head || head.childElementCount > 10 || barHost.contains(el)) continue;
       const text = head.textContent;
       if (text.length > 200) continue;
       const m = text.match(AI_SECTION_PATTERN);
@@ -197,14 +211,14 @@ function rubricItemOf(el) {
 }
 function afterRubricChange() {
   cache.rubric = null;
-  setTimeout(() => { cache.rubric = null; snapshot("rubric"); renderCard(); }, 400);
+  setTimeout(() => { cache.rubric = null; snapshot("rubric"); renderBar(); }, 400);
 }
 
 // ---- Comment snapshot ------------------------------------------------------------------------
 
 function commentText() {
   return [...document.querySelectorAll(EDITABLE)]
-    .filter((el) => !inAi(el) && !cardHost.contains(el))
+    .filter((el) => !inAi(el) && !barHost.contains(el))
     .map((el) => ("value" in el ? el.value : el.innerText).trim())
     .filter(Boolean).join("\n\n");
 }
@@ -234,6 +248,60 @@ function snapshot(reason) {
   send("comment_snapshot", { reason, rubric, commentChars: comment.length, aiChars: ai.length, aiOverlap: overlap(comment, ai), commentText: comment, aiText: ai });
 }
 
+// ---- Answers: AI use, skip, and the move-on guard -------------------------------------------
+
+const isDone = (key) => Boolean(answers[key]?.usage || answers[key]?.skipped);
+const canLeave = () => !logging() || !ctx.key || (isDone(ctx.key) && !pending.length);
+function saveAnswers() { chrome.storage.local.set({ studyAnswers: { answers, pending, lastEntry } }).catch(() => {}); }
+// Called whenever the open answer may have changed. An answer left without an AI-use choice
+// (e.g. through a keyboard shortcut) is queued so the bar asks about it on the next page.
+function enterEntry() {
+  if (!logging() || lastEntry === ctx.key) return;
+  if (lastEntry && !isDone(lastEntry) && !pending.includes(lastEntry)) {
+    pending.push(lastEntry);
+    send("answer_missed", { missedKey: lastEntry });
+  }
+  if (ctx.key && answers[ctx.key]?.skipped) answers[ctx.key].skipped = false; // back to a skipped answer: it needs an answer now
+  lastEntry = ctx.key;
+  saveAnswers();
+  renderBar();
+}
+function setUsage(key, value, late = false) {
+  answers[key] = { ...answers[key], usage: answers[key]?.usage === value && !late ? null : value, skipped: false };
+  pending = pending.filter((k) => k !== key);
+  saveAnswers();
+  send("ai_use", { key, value: answers[key].usage, ...(late ? { late: true } : {}) });
+  hideMessage();
+  renderBar();
+}
+function findNextControl() {
+  const controls = [...document.querySelectorAll("button, a, [role='button']")].filter((el) => !barHost.contains(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true");
+  return controls.find((el) => /^next ungraded$/i.test(controlText(el))) ?? controls.find((el) => /^next$/i.test(controlText(el)));
+}
+function skip() {
+  if (!logging() || !ctx.key) return;
+  answers[ctx.key] = { ...answers[ctx.key], skipped: true };
+  saveAnswers();
+  flushAttention(); snapshot("skip");
+  send("skip");
+  const next = findNextControl();
+  if (next) { leaving = true; next.click(); setTimeout(() => { leaving = false; }, 3000); }
+  else showMessage("Skipped. Open another student or question to continue; come back to this one later.");
+  renderBar();
+}
+function blockedMessage() {
+  return pending.length
+    ? "First answer the AI-use question for the earlier answer shown below."
+    : "Choose how you used the AI for this answer, or press Skip, before moving on.";
+}
+// Chrome's own "Leave site?" prompt for any other way off the page while the answer is open.
+addEventListener("beforeunload", (e) => {
+  if (leaving || canLeave()) return;
+  send("leave_prompt");
+  e.preventDefault();
+  e.returnValue = "";
+});
+
 // ---- Attention and navigation ----------------------------------------------------------------
 
 const round = (obj) => Object.fromEntries(Object.entries(obj).map(([k, ms]) => [k, Math.round(ms)]));
@@ -250,23 +318,31 @@ function flushAttention() {
 }
 function announce() {
   if (document.visibilityState !== "visible") return;
+  command("seenGradescope");
   send("visibility", { visible: true });
   send("page_context", { ids: ctx.ids, path: ctx.path });
+  enterEntry();
 }
 function checkUrl() {
   if (location.pathname === ctx.path) return;
   flushAttention();
-  ctx = parseContext(); lastSnapshot = ""; nudgedKey = null; cache = {};
-  if (document.visibilityState === "visible") send("page_context", { ids: ctx.ids, path: ctx.path });
-  renderCard();
+  ctx = parseContext(); lastSnapshot = ""; cache = {};
+  if (document.visibilityState === "visible") { send("page_context", { ids: ctx.ids, path: ctx.path }); enterEntry(); }
+  renderBar();
 }
 
-// Once a second: note the question and AI feedback, time attention, refresh the box.
-setInterval(() => {
+// Once a second: time the open answer, note the question and AI feedback, refresh the bar.
+let entrySaveAt = 0;
+setInterval(() => { try { tick(); } catch (err) { reportError("tick", err); } }, 1000);
+function tick() {
   const now = performance.now(), dt = Math.min(now - lastTick, 2000);
   lastTick = now;
   if (document.visibilityState !== "visible") return;
-  renderCard();
+  if (logging() && ctx.key && now - lastInput <= ATTENTION_IDLE_MS) {
+    entryMs[ctx.key] = (entryMs[ctx.key] ?? 0) + dt;
+    if (now - entrySaveAt > 5000) { entrySaveAt = now; chrome.storage.local.set({ studyEntryMs: entryMs }).catch(() => {}); }
+  }
+  renderBar();
   if (!logging() || !ctx.key) return;
   const question = questionInfo();
   if (question && questionSentKey !== ctx.key) { questionSentKey = ctx.key; send("question_info", question); }
@@ -280,9 +356,9 @@ setInterval(() => {
   if (aiExpanded() && aiPanels().some(inViewport)) attention.aiVisibleMs += dt;
   if (hover.region) attention.hoverMs[hover.region] = (attention.hoverMs[hover.region] ?? 0) + dt;
   if (hover.section) attention.sectionHoverMs[hover.section] = (attention.sectionHoverMs[hover.section] ?? 0) + dt;
-  if (document.hasFocus() && document.activeElement?.closest?.(EDITABLE) && !cardHost.contains(document.activeElement)) attention.commentFocusMs += dt;
+  if (document.hasFocus() && document.activeElement?.closest?.(EDITABLE) && !barHost.contains(document.activeElement)) attention.commentFocusMs += dt;
   if (now - lastFlush > 15_000) flushAttention();
-}, 1000);
+}
 setInterval(checkUrl, 500);
 addEventListener("popstate", checkUrl);
 
@@ -292,10 +368,15 @@ addEventListener("scroll", () => { attention.scrollPx += Math.abs(scrollY - last
 document.addEventListener("scroll", (e) => { if (e.target !== document) markInput(); }, { capture: true, passive: true });
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") { flushAttention(); snapshot("hidden"); send("visibility", { visible: false }); }
-  else announce();
+  if (document.visibilityState === "hidden") {
+    flushAttention(); snapshot("hidden"); send("visibility", { visible: false });
+    chrome.storage.local.set({ studyEntryMs: entryMs }).catch(() => {});
+  } else announce();
 });
-addEventListener("pagehide", () => { flushAttention(); snapshot("pagehide"); send("visibility", { visible: false }); });
+addEventListener("pagehide", () => {
+  flushAttention(); snapshot("pagehide"); send("visibility", { visible: false });
+  chrome.storage.local.set({ studyEntryMs: entryMs }).catch(() => {});
+});
 
 document.addEventListener("mouseover", (e) => {
   const region = regionOf(e.target);
@@ -304,23 +385,30 @@ document.addEventListener("mouseover", (e) => {
 document.addEventListener("mouseout", (e) => { if (!e.relatedTarget) hover = { region: null, section: null }; }, true);
 
 const controlText = (el) => (el.getAttribute("aria-label") || el.innerText || el.getAttribute("title") || "").trim().replace(/\s+/g, " ");
+// A link that would open a different answer or question (question dropdown, submission list, etc.).
+function leadsElsewhere(el) {
+  const link = el.closest?.("a[href]");
+  if (!link) return false;
+  const url = new URL(link.href, location.href);
+  return url.origin === location.origin && url.pathname !== location.pathname && /\/(questions|submissions)\//.test(url.pathname);
+}
 
-// Registered on window (capture) so a held Next click never reaches Gradescope's own handlers.
+// Registered on window (capture) so a blocked click never reaches Gradescope's own handlers.
 addEventListener("click", (e) => {
-  if (!logging() || cardHost.contains(e.target) || picking) return;
-  const control = e.target.closest?.("button, a, [role='button'], summary");
+  if (!logging() || barHost.contains(e.target) || picking) return;
+  const control = e.target.closest?.("button, a, [role='button'], [role='menuitem'], [role='option'], summary");
   const label = control ? controlText(control) : "";
-  if (control && NAV_TEXT.test(label)) {
-    const missing = checkinMissing();
-    if (CHECKIN.nudgeOnNext && /^next/i.test(label) && missing.length && nudgedKey !== ctx.key) {
+  const isNav = control && (NAV_TEXT.test(label) || leadsElsewhere(control));
+  if (isNav) {
+    if (!leaving && !canLeave()) {
       e.preventDefault(); e.stopImmediatePropagation();
-      nudgedKey = ctx.key;
-      send("checkin_nudge", { missing, control: label });
-      renderCard({ nudge: true });
+      send("nav_blocked", { control: label.slice(0, 60) });
+      showMessage(blockedMessage(), true);
       return;
     }
     flushAttention(); snapshot("navigate");
-    send("navigate", { control: label, checkinMissing: missing });
+    send("navigate", { control: label.slice(0, 60) });
+    leaving = true; setTimeout(() => { leaving = false; }, 3000);
     return;
   }
   if (control && AI_RESULTS_HEADING.test(label)) {
@@ -346,7 +434,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("focusout", (e) => { if (e.target.closest?.(EDITABLE)) snapshot("blur"); }, true);
 let commentTimer = null;
 document.addEventListener("input", (e) => {
-  if (!e.target.closest?.(EDITABLE) || cardHost.contains(e.target)) return;
+  if (!e.target.closest?.(EDITABLE) || barHost.contains(e.target)) return;
   clearTimeout(commentTimer);
   commentTimer = setTimeout(() => snapshot("typing"), 2000);
 }, true);
@@ -363,181 +451,217 @@ document.addEventListener("paste", (e) => {
   send("comment_paste", { chars: text.length, fromAi: pasted.length >= 8 && normalize(aiText()).includes(pasted) });
 }, true);
 
-// ---- Floating study box ----------------------------------------------------------------------
-// Always on Gradescope grading pages. Before a session it offers Start; during a session it shows
-// the question, the rubric verdict read from the page, the quick check-in buttons, and
-// Break / End controls, so graders never need the toolbar popup.
+// ---- Study bar -------------------------------------------------------------------------------
+// A compact bar pinned to the top of every Gradescope grading page (draggable, like a screen-share
+// bar). Before a session it offers Start; during one it shows recording state, the open answer
+// and its timer, the AI-use buttons, Skip, Pause and End. Pausing also covers the page.
 
-const cardHost = document.createElement("div");
-const card = cardHost.attachShadow({ mode: "open" });
-card.innerHTML = `
+const barHost = document.createElement("div");
+const bar = barHost.attachShadow({ mode: "open" });
+bar.innerHTML = `
   <style>
     :host { all: initial; }
-    .card { position: fixed; left: 56px; bottom: 44px; z-index: 2147483646; width: 320px; font: 12px/1.35 system-ui, sans-serif;
-      color: #202124; background: #fff; border: 1px solid #dadce0; border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
-    .head { display: flex; align-items: center; gap: 6px; padding: 7px 10px; cursor: move; border-bottom: 1px solid #eee; user-select: none; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa0a6; flex: none; }
-    .dot.rec { background: #d93025; } .dot.live { background: #1e8e3e; } .dot.paused { background: #f29900; }
-    .title { font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .state { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #fef7e0; color: #b06000; white-space: nowrap; }
-    .state.done { background: #e6f4ea; color: #137333; }
-    .min { border: 0; background: none; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; color: #5f6368; }
-    .body { padding: 8px 10px 10px; display: grid; gap: 9px; }
-    .collapsed .body { display: none; } .collapsed .head { border-bottom: 0; }
-    .verdict { padding: 6px 8px; border-radius: 6px; background: #f1f3f4; }
-    .verdict.ok { background: #e6f4ea; color: #137333; } .verdict.bad { background: #fce8e6; color: #a50e0e; } .verdict.todo { background: #fef7e0; color: #7a4a00; }
-    .label { display: block; margin-bottom: 4px; }
-    .chips { display: flex; flex-wrap: wrap; gap: 5px; }
-    button { font: inherit; cursor: pointer; }
-    button.chip { padding: 3px 9px; border: 1px solid #bdc1c6; border-radius: 14px; background: #fff; }
-    button.chip[aria-pressed="true"] { background: #1a73e8; border-color: #1a73e8; color: #fff; }
-    .nudge { padding: 6px 8px; border-radius: 6px; background: #e8f0fe; color: #174ea6; }
-    .foot { display: flex; gap: 6px; align-items: center; border-top: 1px solid #eee; padding-top: 8px; }
-    .foot .info { flex: 1; color: #5f6368; font-size: 11px; }
-    button.small { padding: 3px 9px; border: 1px solid #bdc1c6; border-radius: 6px; background: #fff; }
-    button.primary { padding: 4px 12px; border: 1px solid #1a73e8; border-radius: 6px; background: #1a73e8; color: #fff; }
-    button.danger { border-color: #f6aea9; background: #fce8e6; }
-    input { font: inherit; padding: 4px 6px; border: 1px solid #bdc1c6; border-radius: 6px; width: 120px; }
-    .start { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-    .pulse { animation: pulse .9s ease-in-out 2; }
-    @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(26,115,232,.35); } }
+    /* All bar sizes are in em, so A−/A+ (which change --scale) resize the bar and let it reflow to fit the window. */
+    .wrap { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 2147483646; font: calc(12px * var(--scale, 1))/1.3 system-ui, sans-serif;
+      display: grid; gap: .33em; justify-items: center; width: max-content; max-width: calc(100vw - 16px); }
+    .wrap.moved { transform: none; }
+    .bar { display: flex; align-items: center; gap: .5em; flex-wrap: wrap; justify-content: center; padding: .5em .66em; border-radius: .85em;
+      background: #202124; color: #e8eaed; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+    .grip { cursor: move; color: #9aa0a6; user-select: none; padding: 0 .15em; letter-spacing: -.15em; }
+    .sep { width: 1px; align-self: stretch; background: #5f6368; }
+    .overview { color: #bdc1c6; }
+    .who { color: #9aa0a6; font-variant-numeric: tabular-nums; }
+    .rec { display: flex; align-items: center; gap: .4em; white-space: nowrap; }
+    .dot { width: .75em; height: .75em; border-radius: 50%; background: #9aa0a6; }
+    .dot.on { background: #f28b82; box-shadow: 0 0 0 .25em rgba(242,139,130,.25); }
+    .entry { display: flex; align-items: baseline; gap: .5em; white-space: nowrap; }
+    .q { font-weight: 600; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+    .clock { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 1.17em; color: #fff; }
+    .qtotal { color: #9aa0a6; font-variant-numeric: tabular-nums; }
+    .ai { display: flex; align-items: center; gap: .33em; }
+    .ai .label { color: #bdc1c6; margin-right: .15em; }
+    .ai.todo .label { color: #fdd663; font-weight: 600; }
+    .tools { display: flex; gap: .25em; }
+    button { font: inherit; cursor: pointer; border-radius: .5em; padding: .33em .75em; border: 1px solid #5f6368; background: #3c4043; color: #e8eaed; white-space: nowrap; }
+    button:hover { background: #4a4e52; }
+    button.choice[aria-pressed="true"] { background: #8ab4f8; border-color: #8ab4f8; color: #202124; font-weight: 600; }
+    button.primary { background: #8ab4f8; border-color: #8ab4f8; color: #202124; font-weight: 600; }
+    button.end { background: #c5221f; border-color: #c5221f; color: #fff; }
+    button.icon { padding: .33em .5em; }
+    input { font: inherit; padding: .33em .5em; border-radius: .5em; border: 1px solid #5f6368; background: #303134; color: #e8eaed; width: 24em; max-width: 60vw; }
+    .msg, .pending { padding: .5em .85em; border-radius: .66em; background: #fef7e0; color: #3c2a00; box-shadow: 0 2px 8px rgba(0,0,0,.2); display: flex; gap: .5em; align-items: center; flex-wrap: wrap; }
+    .pending { background: #fce8e6; color: #5c0b0b; }
+    .pending button { background: #fff; color: #202124; border-color: #dadce0; }
+    .shake { animation: shake .35s ease-in-out 2; }
+    @keyframes shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+    .overlay { position: fixed; inset: 0; z-index: 2147483645; background: #202124; color: #e8eaed; display: grid; place-content: center;
+      text-align: center; gap: 12px; font: 15px/1.5 system-ui, sans-serif; }
+    .overlay b { font-size: 22px; }
+    .overlay button { justify-self: center; font-size: 15px; padding: 8px 18px; }
+    .paused .full { display: none !important; }
+    /* Minimized: only what's needed to move on (AI use) and to step away (Pause). */
+    .min > :not(.keep), .min .rec-text, .min .startrec { display: none !important; }
     [hidden] { display: none !important; }
   </style>
-  <div class="card" role="region" aria-label="Grading study">
-    <div class="head"><span class="dot"></span><span class="title">Grading study</span><span class="state" hidden></span>
-      <button class="min" title="Minimize" aria-label="Minimize">–</button></div>
-    <div class="body">
-      <div class="start" data-view="idle">
-        <input class="code" placeholder="Participant code" maxlength="40" aria-label="Participant code">
-        <button class="primary go">Start session</button>
-      </div>
-      <div data-view="paused">On a break. Logging and recording are paused. <button class="small resume">Resume</button></div>
-      <div class="verdict" data-view="live"></div>
-      <div data-view="live" class="usage"><span class="label">What did you do with the AI feedback?</span><div class="chips"></div></div>
-      <div data-view="live" class="sections"><span class="label">Which AI sections were wrong?</span><div class="chips"></div></div>
-      <div data-view="live" class="helpful"><span class="label">Was the AI feedback helpful for grading this answer?</span>
-        <div class="chips"><button class="chip" data-v="yes">Yes</button><button class="chip" data-v="somewhat">Somewhat</button><button class="chip" data-v="no">No</button></div></div>
-      <div class="nudge" data-view="live" hidden>Quick check-in before moving on, or click Next again to skip.</div>
-      <div class="foot" data-view="session"><span class="info"></span><button class="small brk">Take a break</button><button class="small danger end">End session</button></div>
+  <div class="overlay" hidden><b>Paused</b><div>Grading time and the screen recording are paused,<br>and this page is hidden while you're away.</div><button class="primary resume">Resume grading</button></div>
+  <div class="wrap">
+    <div class="bar" role="toolbar" aria-label="Grading study">
+      <span class="grip keep" title="Drag to move">⋮⋮</span>
+      <span data-view="idle"><b>Grading study</b></span>
+      <input data-view="idle" class="code" placeholder="Paste your grader ID" maxlength="64" spellcheck="false" aria-label="Grader ID">
+      <button data-view="idle" class="primary go">Start session</button>
+      <span data-view="live" class="who full" title=""></span>
+      <span data-view="live" class="rec keep"><span class="dot"></span><span class="rec-text"></span><button class="startrec" hidden>Start recording</button></span>
+      <span data-view="live" class="sep full"></span>
+      <span data-view="live" class="overview">Not grading right now. Open a question to grade; timing starts automatically.</span>
+      <span data-view="live" data-answer class="entry"><span class="q"></span><span class="clock" title="Time on this answer">00:00</span><span class="qtotal full" title="Total time on this question"></span></span>
+      <span data-view="live" data-answer class="sep full"></span>
+      <span data-view="live" data-answer class="ai full keep"><span class="label">AI use:</span></span>
+      <button data-view="live" data-answer class="skip full" title="Leave this answer for now and come back later">Skip ⏭</button>
+      <span data-view="live" class="sep full"></span>
+      <button data-view="live" class="pause keep" title="Pause timer and recording">⏸ Pause</button>
+      <button data-view="live" class="end" title="End the session and save files">■ End</button>
+      <span class="tools"><button class="icon size" data-step="-1" title="Make the bar smaller">A−</button><button class="icon size" data-step="1" title="Make the bar larger">A+</button><button class="icon help" title="How this works">?</button></span>
+      <button class="icon min-btn keep" title="Minimize">–</button>
     </div>
+    <div class="pending" hidden></div>
+    <div class="msg" hidden></div>
   </div>`;
-const $c = (sel) => card.querySelector(sel);
-let ui = { collapsed: false, left: null, top: null };
+const $b = (sel) => bar.querySelector(sel);
+let ui = { minimized: false, left: null, top: null, scale: 1 };
+const SCALE_MIN = 0.8, SCALE_MAX = 2;
 let endArmed = false;
+let msgTimer = null;
 
-$c(".usage .chips").append(...USAGE_OPTIONS.map(([value, text]) => Object.assign(document.createElement("button"), { className: "chip", textContent: text, value })));
+$b(".ai").append(...USAGE_OPTIONS.map(([value, text]) => Object.assign(document.createElement("button"), { className: "choice", textContent: text, value })));
 
-function answers() { return (checkins[ctx.key] ??= { usage: null, helpful: null, wrongSections: [] }); }
-function saveCheckins() { chrome.storage.local.set({ checkins }).catch(() => {}); }
-const wrongSectionChoices = () => [...aiSections().filter((s) => !s.needsReview).map((s) => s.id), "Other"];
-function checkinMissing() {
-  if (!ctx.key) return [];
-  const a = answers(), missing = [];
-  if (!a.usage) missing.push("usage");
-  if (CHECKIN.askWrongSections && a.usage === "corrected" && aiSections().length && !a.wrongSections.length) missing.push("wrong_sections");
-  if (!a.helpful) missing.push("helpful");
-  return missing;
+function showMessage(text, shake = false) {
+  const msg = $b(".msg");
+  msg.textContent = text;
+  msg.hidden = false;
+  if (shake) { const b = $b(".bar"); b.classList.remove("shake"); void b.offsetWidth; b.classList.add("shake"); ui.minimized = false; renderBar(); }
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(hideMessage, 6000);
 }
-function setAnswer(field, value) {
-  const a = answers();
-  if (field === "wrong_sections") a.wrongSections = a.wrongSections.includes(value) ? a.wrongSections.filter((s) => s !== value) : [...a.wrongSections, value];
-  else a[field] = a[field] === value ? null : value;
-  saveCheckins();
-  send("checkin", { field, value: field === "wrong_sections" ? a.wrongSections : a[field] });
-  renderCard();
-}
-card.addEventListener("click", async (e) => {
+function hideMessage() { $b(".msg").hidden = true; }
+
+bar.addEventListener("click", async (e) => {
   const button = e.target.closest("button");
   if (!button) return;
-  if (button.classList.contains("min")) { ui.collapsed = !ui.collapsed; chrome.storage.local.set({ checkinUi: ui }); renderCard(); return; }
+  if (button.classList.contains("help")) return command("openTutorial");
+  if (button.classList.contains("min-btn")) { ui.minimized = !ui.minimized; chrome.storage.local.set({ barUi: ui }); return renderBar(); }
+  if (button.classList.contains("size")) {
+    ui.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Math.round(((ui.scale ?? 1) + Number(button.dataset.step) * 0.1) * 10) / 10));
+    chrome.storage.local.set({ barUi: ui });
+    return place();
+  }
   if (button.classList.contains("go")) {
-    const participant = $c(".code").value.trim();
-    if (!participant) { $c(".code").focus(); return; }
-    const result = await command("startSession", { participant });
-    if (result?.error) showToast(result.error);
+    const graderId = $b(".code").value;
+    const error = graderIdError(graderId);
+    if (error) { showMessage(error, true); return $b(".code").focus(); }
+    const result = await command("startSession", { graderId });
+    if (result?.error) showMessage(result.error);
     return;
   }
-  if (button.classList.contains("brk")) { await command("pause"); return; }
-  if (button.classList.contains("resume")) { await command("resume"); return; }
+  if (button.classList.contains("startrec")) return command("openRecorder");
+  if (button.classList.contains("pause")) {
+    if (status.paused) return command("resume");
+    flushAttention(); snapshot("pause");
+    return command("pause");
+  }
+  if (button.classList.contains("resume")) return command("resume");
+  if (button.classList.contains("skip")) return skip();
   if (button.classList.contains("end")) {
-    if (!endArmed) { endArmed = true; button.textContent = "Click to confirm"; setTimeout(() => { endArmed = false; renderCard(); }, 4000); return; }
+    if (!endArmed) {
+      endArmed = true;
+      showMessage(isDone(ctx.key) || !ctx.key ? "Click ■ End again to end the session and save your files." : "This answer has no AI-use choice yet. Click ■ End again to end anyway.");
+      setTimeout(() => { endArmed = false; }, 5000);
+      return;
+    }
     endArmed = false;
     flushAttention(); snapshot("session_end");
     await command("endSession");
-    showToast("Session ended. Your logs and recording are being saved to Downloads/grading-study/.", 8000);
+    showMessage("Session ended. Your recording and logs are being saved to Downloads/grading-study/.");
     return;
   }
-  if (button.closest(".usage")) setAnswer("usage", button.value);
-  else if (button.closest(".helpful")) setAnswer("helpful", button.dataset.v);
-  else if (button.closest(".sections")) setAnswer("wrong_sections", button.dataset.v);
+  if (button.classList.contains("choice")) {
+    const key = button.closest(".pending") ? button.dataset.key : ctx.key;
+    if (key) setUsage(key, button.value, key !== ctx.key);
+  }
 });
-card.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter" && e.target.classList.contains("code")) $c(".go").click(); });
-$c(".head").addEventListener("mousedown", (e) => {
-  if (e.target.closest("button")) return;
-  const box = $c(".card").getBoundingClientRect(), dx = e.clientX - box.left, dy = e.clientY - box.top;
+bar.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter" && e.target.classList.contains("code")) $b(".go").click(); });
+$b(".grip").addEventListener("mousedown", (e) => {
+  const box = $b(".wrap").getBoundingClientRect(), dx = e.clientX - box.left, dy = e.clientY - box.top;
   const move = (m) => { ui.left = Math.max(0, m.clientX - dx); ui.top = Math.max(0, m.clientY - dy); place(); };
-  const up = () => { removeEventListener("mousemove", move, true); removeEventListener("mouseup", up, true); chrome.storage.local.set({ checkinUi: ui }); };
+  const up = () => { removeEventListener("mousemove", move, true); removeEventListener("mouseup", up, true); chrome.storage.local.set({ barUi: ui }); };
   addEventListener("mousemove", move, true); addEventListener("mouseup", up, true);
   e.preventDefault();
 });
 function place() {
+  $b(".wrap").style.setProperty("--scale", ui.scale ?? 1);
   if (ui.left === null) return;
-  Object.assign($c(".card").style, { left: `${Math.min(ui.left, innerWidth - 120)}px`, top: `${Math.min(ui.top, innerHeight - 40)}px`, bottom: "auto" });
+  $b(".wrap").classList.add("moved");
+  Object.assign($b(".wrap").style, { left: `${Math.min(ui.left, innerWidth - 160)}px`, top: `${Math.min(ui.top, innerHeight - 40)}px` });
 }
-const VERDICT_TEXT = {
-  none: ["todo", "Rubric: no autograder-verdict item applied yet."],
-  ai_correct: ["ok", "Rubric: autograder correct."],
-  ai_correct_with_comments: ["ok", "Rubric: autograder correct, with your comments."],
-  ai_error: ["bad", "Rubric: autograder made an error."]
+function clock(ms) {
+  const s = Math.floor((ms ?? 0) / 1000);
+  const mm = String(Math.floor(s / 60) % 60).padStart(2, "0"), ss = String(s % 60).padStart(2, "0");
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+const answerLabel = (key) => {
+  const [, q, sub] = key.match(/^q?(\w+)-s(\d+)$/) ?? [];
+  return q ? `question ${q}, submission ${sub}` : key;
 };
-function setPressed(scope, isPressed) { card.querySelectorAll(`${scope} button`).forEach((b) => b.setAttribute("aria-pressed", String(isPressed(b)))); }
-function renderCard({ nudge = false } = {}) {
-  if (!ctx.key) { cardHost.remove(); return; }
-  if (!cardHost.isConnected) { document.documentElement.append(cardHost); place(); }
-  const view = !status.active ? "idle" : status.paused ? "paused" : "live";
-  const shell = $c(".card");
-  const nudging = view === "live" && nudgedKey === ctx.key && checkinMissing().length > 0;
-  shell.classList.toggle("collapsed", ui.collapsed && !nudge && !nudging);
-  card.querySelectorAll("[data-view]").forEach((el) => {
-    el.hidden = !(el.dataset.view === view || (el.dataset.view === "session" && view !== "idle"));
+const onCoursePage = () => /^\/courses\/\d+/.test(location.pathname);
+function renderBar() { try { drawBar(); } catch (err) { reportError("bar", err); } }
+function drawBar() {
+  if (!onCoursePage()) { barHost.remove(); return; }
+  if (!barHost.isConnected) { document.documentElement.append(barHost); place(); }
+  const view = !status.active ? "idle" : "live";
+  $b(".bar").classList.toggle("min", ui.minimized);
+  $b(".min-btn").textContent = ui.minimized ? "⤢" : "–";
+  $b(".min-btn").title = ui.minimized ? "Show the full bar" : "Minimize";
+  $b(".bar").classList.toggle("paused", status.paused);
+  $b(".pause").textContent = status.paused ? "▶ Resume" : "⏸ Pause";
+  $b(".pause").classList.toggle("primary", status.paused);
+  bar.querySelectorAll("[data-view]").forEach((el) => {
+    el.hidden = el.dataset.view !== view || ("answer" in el.dataset && !ctx.key) || (el.classList.contains("overview") && Boolean(ctx.key));
   });
-  $c(".dot").className = `dot${status.recording ? " rec" : view === "live" ? " live" : view === "paused" ? " paused" : ""}`;
-  const q = questionInfo();
-  $c(".title").textContent = view === "idle" ? "Grading study" : q ? `Q${q.number}: ${q.title}` : "Grading study";
-  $c(".foot .info").textContent = status.recording ? "● Recording" : view === "idle" ? "" : "Not recording";
-  $c(".end").textContent = endArmed ? "Click to confirm" : "End session";
+  $b(".overlay").hidden = !(status.active && status.paused);
   if (view === "idle") {
-    if (!$c(".code").value && status.participant) $c(".code").value = status.participant;
-    $c(".state").hidden = true;
+    if (!$b(".code").value && status.graderId) $b(".code").value = status.graderId;
+    $b(".pending").hidden = true;
     return;
   }
-  if (view === "paused") { $c(".state").hidden = true; return; }
-
-  const a = answers(), missing = checkinMissing();
-  const [tone, text] = VERDICT_TEXT[currentVerdict()];
-  $c(".verdict").className = `verdict ${tone}`;
-  $c(".verdict").textContent = text;
-  setPressed(".usage", (b) => a.usage === b.value);
-  setPressed(".helpful", (b) => a.helpful === b.dataset.v);
-  const showSections = CHECKIN.askWrongSections && a.usage === "corrected" && aiSections().length > 0;
-  $c(".sections").hidden = !showSections;
-  if (showSections) {
-    const ids = wrongSectionChoices(), chips = $c(".sections .chips");
-    if (chips.dataset.ids !== ids.join("|")) {
-      chips.dataset.ids = ids.join("|");
-      chips.replaceChildren(...ids.map((id) => {
-        const b = Object.assign(document.createElement("button"), { className: "chip", textContent: id, title: aiSections().find((s) => s.id === id)?.title ?? "" });
-        b.dataset.v = id;
+  $b(".who").textContent = `Grader ${status.graderId.slice(0, 8)}`;
+  $b(".who").title = `Grader ID ${status.graderId}`;
+  $b(".dot").classList.toggle("on", status.recording);
+  $b(".rec-text").textContent = status.recording ? "REC" : status.paused ? "Paused" : "Not recording";
+  $b(".startrec").hidden = status.recording || status.paused;
+  const q = questionInfo();
+  $b(".q").textContent = q ? `Q${q.number} ${q.title}` : `Question ${ctx.ids.question ?? ""}`;
+  $b(".q").title = `Submission ${ctx.ids.submission ?? ""}`;
+  $b(".clock").textContent = clock(entryMs[ctx.key]);
+  const prefix = ctx.ids.question ? `q${ctx.ids.question}-` : null;
+  const total = prefix ? Object.entries(entryMs).filter(([k]) => k.startsWith(prefix)).reduce((sum, [, ms]) => sum + ms, 0) : 0;
+  $b(".qtotal").textContent = prefix ? `Q total ${clock(total)}` : "";
+  const a = answers[ctx.key] ?? {};
+  $b(".ai").classList.toggle("todo", !a.usage);
+  $b(".ai .label").textContent = a.usage ? "AI use:" : "AI use? ▸";
+  bar.querySelectorAll(".bar .choice").forEach((b) => b.setAttribute("aria-pressed", String(a.usage === b.value)));
+  // Earlier answers left without an AI-use choice are asked about here, one at a time.
+  const missed = pending.find((k) => k !== ctx.key);
+  const box = $b(".pending");
+  box.hidden = !missed;
+  if (missed && box.dataset.key !== missed) {
+    box.dataset.key = missed;
+    box.replaceChildren(Object.assign(document.createElement("span"), { textContent: `You left ${answerLabel(missed)} without an AI-use answer. What did you do with the AI there?` }),
+      ...USAGE_OPTIONS.map(([value, text]) => {
+        const b = Object.assign(document.createElement("button"), { className: "choice", textContent: text, value });
+        b.dataset.key = missed;
         return b;
       }));
-    }
-    setPressed(".sections", (b) => a.wrongSections.includes(b.dataset.v));
   }
-  $c(".state").hidden = false;
-  $c(".state").textContent = missing.length ? `${missing.length} left` : "done";
-  $c(".state").className = `state${missing.length ? "" : " done"}`;
-  $c(".nudge").hidden = !nudging;
-  if (nudge) { shell.classList.remove("pulse"); void shell.offsetWidth; shell.classList.add("pulse"); }
 }
 
 // ---- Calibration (researcher tool) -----------------------------------------------------------
@@ -621,6 +745,7 @@ function probe() {
     regions[region] = { selector, matches, chars };
   }
   return {
+    version: chrome.runtime.getManifest().version, barShown: barHost.isConnected,
     key: ctx.key, question: questionInfo(), regions,
     aiResults: aiResultsBlock() ? (aiExpanded() ? "found, expanded" : "found, collapsed") : "not found",
     sections: aiSections().map(({ id, mark, needsReview }) => (needsReview ? `${id}:needs review` : `${id}:${mark || "?"}`)),
@@ -633,21 +758,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.kind === "probe") reply(probe());
 });
 
-chrome.storage.local.get(["studyStatus", "selectors", "checkins", "checkinUi"]).then((saved) => {
+function loadAnswers(saved) {
+  answers = saved?.answers ?? {};
+  pending = saved?.pending ?? [];
+  lastEntry = saved?.lastEntry ?? null;
+}
+chrome.storage.local.get(["studyStatus", "selectors", "studyAnswers", "studyEntryMs", "barUi"]).then((saved) => {
   status = { ...status, ...saved.studyStatus };
   selectors = { ...DEFAULT_SELECTORS, ...saved.selectors };
-  checkins = saved.checkins ?? {};
-  ui = { ...ui, ...saved.checkinUi };
-  announce(); renderCard();
+  loadAnswers(saved.studyAnswers);
+  entryMs = saved.studyEntryMs ?? {};
+  ui = { ...ui, ...saved.barUi };
+  announce(); renderBar();
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.selectors) selectors = { ...DEFAULT_SELECTORS, ...changes.selectors.newValue };
-  if (changes.checkins) checkins = changes.checkins.newValue ?? {};
+  if (changes.studyAnswers) loadAnswers(changes.studyAnswers.newValue);
+  if (changes.studyEntryMs) {
+    // Another tab may also be timing answers; keep the larger count for each.
+    const incoming = changes.studyEntryMs.newValue ?? {};
+    entryMs = Object.keys(incoming).length ? Object.fromEntries([...new Set([...Object.keys(entryMs), ...Object.keys(incoming)])]
+      .map((k) => [k, Math.max(entryMs[k] ?? 0, incoming[k] ?? 0)])) : {};
+  }
   if (changes.studyStatus) {
     const was = logging();
     status = { ...status, ...changes.studyStatus.newValue };
     if (!was && logging()) announce();
-    renderCard();
+    renderBar();
   }
 });

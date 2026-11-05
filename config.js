@@ -1,3 +1,17 @@
+// Grader IDs are issued by the study team (one per grader, e.g. a UUID) and the ID-to-name key is
+// kept separately, so the data never contains names. GRADER_ID_PATTERN checks the format; list the
+// issued IDs in GRADER_IDS to also reject typos (leave it empty to accept any well-formed ID).
+const GRADER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GRADER_IDS = [];
+const normalizeGraderId = (id) => String(id ?? "").trim().toLowerCase();
+function graderIdError(id) {
+  const value = normalizeGraderId(id);
+  if (!value) return "Enter the grader ID the study team gave you.";
+  if (!GRADER_ID_PATTERN.test(value)) return "That doesn't look like a grader ID. Copy and paste it from the study team's message.";
+  if (GRADER_IDS.length && !GRADER_IDS.map(normalizeGraderId).includes(value)) return "That grader ID isn't on the study list. Check it for typos.";
+  return null;
+}
+
 // AI feedback comes from the claude-grading-assistant Gradescope autograder (tests[] in
 // results.json), shown on the grading page under "Autograder Results". Each test header renders
 // as "<question> — <criterion> (<score>/<max>)", where the criterion usually begins with the AI's
@@ -21,21 +35,13 @@ const RUBRIC_VERDICTS = [
   ["ai_correct", /comments are correct|score (and comments )?(is|are) correct|CONFIRMED/i]
 ];
 
-// Quick buttons on the check-in box: what the grader did with the AI feedback on this answer.
+// AI-use buttons on the study bar: what the grader did with the AI-generated feedback/grade for
+// this answer. One must be chosen (or Skip pressed) before moving to another answer.
 const USAGE_OPTIONS = [
-  ["accepted", "Accepted as-is"],
-  ["accepted_added", "Accepted + added comments"],
-  ["corrected", "Corrected the AI"],
-  ["not_used", "Graded without it"]
+  ["kept", "Kept as-is"],
+  ["edited", "Edited it"],
+  ["not_used", "Didn't use"]
 ];
-
-const CHECKIN = {
-  // The first Next / Next Ungraded click with an unfinished check-in shows a reminder instead of
-  // moving on; clicking again always proceeds (logged as skipped). Set false to never hold Next.
-  nudgeOnNext: true,
-  // After "Corrected the AI", also ask which AI sections were wrong (when sections are visible).
-  askWrongSections: true
-};
 
 // Optional page regions for finer attention measures. Selectors can be set from the popup's
 // "Calibrate page regions" panel; overrides are saved in chrome.storage.local under "selectors".

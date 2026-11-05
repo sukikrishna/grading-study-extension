@@ -6,7 +6,7 @@
 function blankRow(sessionId, key, session) {
   return {
     // identity
-    session_id: sessionId, participant: session?.participant ?? "",
+    grader_id: session?.graderId ?? "", session_id: sessionId,
     question_number: "", question_title: "", question_id: "", submission_id: "", course_id: "", assignment_id: "",
     answer_key: key, first_opened: "", visits: 0,
     // efficiency
@@ -15,14 +15,14 @@ function blankRow(sessionId, key, session) {
     ai_sections_found: 0, ai_section_count: "", ai_marks: "", ai_needs_review: "", ai_results_opened: 0,
     // rubric verdict on the AI (read from the page)
     rubric_verdict: "", rubric_items_applied: "", rubric_points: "", rubric_source: "", rubric_actions: 0,
-    // grader check-in
-    usage: "", wrong_sections: "", helpful: "", checkin_complete: 0, checkin_nudged: 0, left_with_missing: "",
+    // AI use (study bar) and workflow
+    ai_use: "", ai_use_late: 0, status: "", skips: 0, nav_blocked: 0, leave_prompts: 0,
     // grader's added feedback
     comment_chars: "", comment_ai_overlap: "", comment_pastes: 0, comment_pastes_from_ai: 0,
     // engagement with the AI feedback
     ai_visible_ms: 0, hover_ai_panel_ms: 0, hover_rubric_ms: 0, hover_submission_ms: 0, comment_focus_ms: 0, scroll_px: 0,
     ai_section_hover_s: "", ai_section_clicks: "", ai_copies: 0, markers: 0,
-    _firstT: null, _toggles: {}, _dom: null, _sectionHover: {}, _sectionClicks: {}, _wrong: []
+    _firstT: null, _toggles: {}, _dom: null, _sectionHover: {}, _sectionClicks: {}, _missed: false
   };
 }
 const VERDICT_ORDER = ["ai_error", "ai_correct_with_comments", "ai_correct"];
@@ -80,12 +80,11 @@ function summarize(events) {
         if (e.category) r._toggles[e.category] = !r._toggles[e.category];
         if (r.time_to_rubric_ms === "" && r._firstT !== null) r.time_to_rubric_ms = e.t - r._firstT;
       } break;
-      case "checkin": if (r) {
-        if (e.field === "wrong_sections") r._wrong = e.value ?? [];
-        else r[e.field] = e.value ?? "";
-      } break;
-      case "checkin_nudge": if (r) r.checkin_nudged++; break;
-      case "navigate": if (r) r.left_with_missing = (e.checkinMissing ?? []).join(";"); break;
+      case "ai_use": if (r) { r.ai_use = e.value ?? ""; if (e.late) r.ai_use_late = 1; } break;
+      case "skip": if (r) r.skips++; break;
+      case "nav_blocked": if (r) r.nav_blocked++; break;
+      case "leave_prompt": if (r) r.leave_prompts++; break;
+      case "answer_missed": if (e.missedKey) rowFor(e.sessionId, e.missedKey)._missed = true; break;
       case "comment_snapshot": if (r) {
         r.comment_chars = e.commentChars; r.comment_ai_overlap = e.aiOverlap ?? "";
         if (e.rubric?.readable) r._dom = e.rubric.applied;
@@ -117,23 +116,103 @@ function summarize(events) {
       r.rubric_source = "clicks";
       r.rubric_verdict = strongest(Object.entries(r._toggles).filter(([, on]) => on).map(([c]) => c));
     } else r.rubric_verdict = "none";
-    r.wrong_sections = r._wrong.join(";");
     r.ai_section_hover_s = joinMap(r._sectionHover, 1000);
     r.ai_section_clicks = joinMap(r._sectionClicks);
-    r.checkin_complete = r.usage && r.helpful && (r.usage !== "corrected" || !r.ai_sections_found || r._wrong.length) ? 1 : 0;
+    // answered: an AI-use choice is recorded; skipped: only ever skipped; missing: neither.
+    r.status = r.ai_use ? "answered" : r.skips ? "skipped" : "missing";
     return Object.fromEntries(Object.entries(r).filter(([k]) => !k.startsWith("_")).map(([k, v]) =>
       k.endsWith("_ms") ? [`${k.slice(0, -3)}_s`, v === "" ? "" : Math.round(v / 100) / 10] : [k, v]));
   });
 }
 
-// One row per question: how many answers, how long they took, and how graders judged the AI.
+// One row per visit: each continuous stretch a grader had one student's answer to one question
+// open, from opening it until moving to another answer or ending the session. An answer that is
+// skipped and revisited, or reopened later, has several visits; answers.csv adds them up.
+// video_start_s / video_end_s locate the visit in the session's screen recording (breaks are
+// already cut out of the video), so clips can be cut without watching the whole recording.
+// `videoFiles` maps recording IDs to the saved video file names.
+function summarizeVisits(events, videoFiles = {}) {
+  const visits = [];
+  const sessions = {};
+  const visibleTabs = new Set();
+  const counts = {};
+  let visit = null, idle = false, paused = false, lastT = null;
+  const close = (e, endedBy) => {
+    if (!visit) return;
+    visit.ended_at = e.ts;
+    if (visit.video_recording_id) visit.video_end_s = e.videoRecordingId === visit.video_recording_id ? e.videoSec : visit._lastVideoSec;
+    visit.ended_by ||= endedBy;
+    visits.push(visit);
+    visit = null;
+  };
+  for (const e of events) {
+    if (visit && lastT !== null && e.type !== "session_started") {
+      const dt = e.t - lastT;
+      visit.wall_ms += dt;
+      if (paused) visit.paused_ms += dt;
+      else if (!idle && visibleTabs.has(visit._tabId)) visit.active_ms += dt;
+    }
+    lastT = e.t;
+    if (visit && e.videoRecordingId && e.type !== "page_changed") {
+      // A recording that starts mid-visit begins this visit's clip at its first frame.
+      if (!visit.video_recording_id) Object.assign(visit, { video_recording_id: e.videoRecordingId, video_start_s: e.videoSec });
+      if (e.videoRecordingId === visit.video_recording_id) visit._lastVideoSec = e.videoSec;
+    }
+    switch (e.type) {
+      case "session_started": close(e, "session_restart"); sessions[e.sessionId] = e; idle = false; paused = false; visibleTabs.clear(); break;
+      case "session_ended": close(e, "session_end"); break;
+      case "paused": paused = true; break;
+      case "resumed": paused = false; break;
+      case "idle_state": idle = e.state !== "active"; break;
+      case "visibility": if (e.visible) visibleTabs.add(e.tabId); else visibleTabs.delete(e.tabId); break;
+      case "page_changed": {
+        close(e, "other");
+        if (!e.key) break;
+        const id = `${e.sessionId}|${e.key}`;
+        counts[id] = (counts[id] ?? 0) + 1;
+        visit = {
+          grader_id: sessions[e.sessionId]?.graderId ?? "", session_id: e.sessionId,
+          question_number: "", question_title: "", question_id: e.ids?.question ?? "", submission_id: e.ids?.submission ?? "",
+          answer_key: e.key, visit_number: counts[id], started_at: e.ts, ended_at: "",
+          video_file: "", video_recording_id: e.videoRecordingId ?? "", video_start_s: e.videoSec ?? "", video_end_s: "",
+          active_ms: 0, wall_ms: 0, paused_ms: 0, ai_use_at_end: "", ended_by: "", _tabId: e.tabId, _lastVideoSec: e.videoSec ?? ""
+        };
+        break;
+      }
+      case "question_info": if (visit && e.key === visit.answer_key) Object.assign(visit, { question_number: e.number, question_title: e.title }); break;
+      case "ai_use": if (visit && e.key === visit.answer_key) visit.ai_use_at_end = e.value ?? ""; break;
+      case "skip": if (visit && e.key === visit.answer_key) visit.ended_by = "skip"; break;
+      case "navigate": if (visit && e.key === visit.answer_key && !visit.ended_by) visit.ended_by = `navigate: ${e.control || "link"}`; break;
+      case "leave_prompt": if (visit && e.key === visit.answer_key && !visit.ended_by) visit.ended_by = "left page another way"; break;
+    }
+  }
+  if (visit) visits.push({ ...visit, ended_by: visit.ended_by || "log ended", video_end_s: visit._lastVideoSec });
+  for (const v of visits) v.video_file = videoFiles[v.video_recording_id] ?? "";
+  // The question title is read once per page; copy it to every visit of the same question.
+  const titles = {};
+  for (const v of visits) if (v.question_number) titles[v.question_id] = [v.question_number, v.question_title];
+  for (const v of visits) if (!v.question_number && titles[v.question_id]) [v.question_number, v.question_title] = titles[v.question_id];
+  // ai_use_at_end only reflects answers given during that visit; carry the latest one forward.
+  const latest = {};
+  for (const v of visits) {
+    const id = `${v.session_id}|${v.answer_key}`;
+    if (v.ai_use_at_end) latest[id] = v.ai_use_at_end;
+    else v.ai_use_at_end = latest[id] ?? "";
+  }
+  return visits.map((v) => Object.fromEntries(Object.entries(v).filter(([k]) => !k.startsWith("_")).map(([k, val]) =>
+    k.endsWith("_ms") ? [`${k.slice(0, -3)}_s`, Math.round(val / 100) / 10] : [k, val])));
+}
+
+// One row per question per grader (grader_id): answers handled, time spent, AI use and rubric verdicts.
+// Combine the files of all graders to get totals per question across graders.
 function summarizeByQuestion(rows) {
   const groups = new Map();
   for (const r of rows) {
-    const id = r.question_id || r.answer_key;
+    const id = `${r.grader_id}|${r.question_id || r.answer_key}`;
     if (!groups.has(id)) groups.set(id, []);
     groups.get(id).push(r);
   }
+  const sum = (xs) => Math.round(xs.reduce((a, b) => a + b, 0) * 10) / 10;
   const mean = (xs) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10 : "");
   const median = (xs) => {
     if (!xs.length) return "";
@@ -142,29 +221,26 @@ function summarizeByQuestion(rows) {
   };
   const share = (list, test) => (list.length ? Math.round((list.filter(test).length / list.length) * 1000) / 1000 : "");
   return [...groups.values()].map((list) => {
-    const active = list.map((r) => r.active_s);
-    const toRubric = list.map((r) => r.time_to_rubric_s).filter((v) => v !== "");
-    const checked = list.filter((r) => r.checkin_complete);
+    const answered = list.filter((r) => r.status === "answered");
+    const active = answered.map((r) => r.active_s);
     return {
-      question_id: list[0].question_id, question_number: list.find((r) => r.question_number)?.question_number ?? "",
+      grader_id: list[0].grader_id, question_id: list[0].question_id,
+      question_number: list.find((r) => r.question_number)?.question_number ?? "",
       question_title: list.find((r) => r.question_title)?.question_title ?? "",
-      participants: [...new Set(list.map((r) => r.participant))].join(";"), answers: list.length,
-      total_active_s: Math.round(active.reduce((a, b) => a + b, 0) * 10) / 10,
-      mean_active_s: mean(active), median_active_s: median(active), mean_time_to_rubric_s: mean(toRubric),
-      share_rubric_ai_correct: share(list, (r) => r.rubric_verdict.startsWith("ai_correct")),
-      share_rubric_ai_error: share(list, (r) => r.rubric_verdict === "ai_error"),
-      share_rubric_none: share(list, (r) => r.rubric_verdict === "none"),
-      ...Object.fromEntries(USAGE_KEYS.map((u) => [`share_usage_${u}`, share(checked, (r) => r.usage === u)])),
-      share_helpful_yes: share(checked, (r) => r.helpful === "yes"),
-      share_helpful_somewhat: share(checked, (r) => r.helpful === "somewhat"),
-      share_helpful_no: share(checked, (r) => r.helpful === "no"),
-      checkin_completion: share(list, (r) => r.checkin_complete),
-      mean_comment_chars: mean(list.map((r) => r.comment_chars).filter((v) => v !== "")),
-      mean_ai_visible_s: mean(list.map((r) => r.ai_visible_s))
+      answers_opened: list.length, answered: answered.length,
+      skipped_unfinished: list.filter((r) => r.status === "skipped").length, missing: list.filter((r) => r.status === "missing").length,
+      total_active_s: sum(list.map((r) => r.active_s)), total_time_on_page_s: sum(list.map((r) => r.time_on_page_s)),
+      mean_active_s_per_answer: mean(active), median_active_s_per_answer: median(active),
+      ...Object.fromEntries(USAGE_KEYS.map((u) => [`share_ai_${u}`, share(answered, (r) => r.ai_use === u)])),
+      share_rubric_ai_correct: share(answered, (r) => r.rubric_verdict.startsWith("ai_correct")),
+      share_rubric_ai_error: share(answered, (r) => r.rubric_verdict === "ai_error"),
+      share_rubric_none: share(answered, (r) => r.rubric_verdict === "none"),
+      mean_comment_chars: mean(answered.map((r) => r.comment_chars).filter((v) => v !== "")),
+      mean_ai_visible_s: mean(answered.map((r) => r.ai_visible_s))
     };
   }).sort((a, b) => String(a.question_number).localeCompare(String(b.question_number), undefined, { numeric: true }));
 }
-const USAGE_KEYS = ["accepted", "accepted_added", "corrected", "not_used"];
+const USAGE_KEYS = ["kept", "edited", "not_used"];
 
 // Adds videoRecordingId / videoSec to each event that happened while a screen recording was
 // running, so a coder can jump straight to that moment in the .webm file.
@@ -191,20 +267,26 @@ function toCsv(rows) {
   return [header, ...rows.map((r) => header.map((h) => r[h]))].map((line) => line.map(cell).join(",")).join("\n") + "\n";
 }
 
-// Builds the export files from the stored log and saves them to Downloads/grading-study/.
-async function exportLogs() {
-  const { studyState } = await chrome.storage.local.get("studyState");
-  const events = annotateVideoOffsets(studyState?.events ?? []);
+// Builds the export files from the stored log and saves them into the session's folder.
+// Builds the export files for one session (the current or most recent one by default) and saves
+// them into that session's folder next to its screen recording. Earlier sessions are not repeated.
+async function exportLogs(sessionId = null) {
+  const { studyState, recordings = [] } = await chrome.storage.local.get(["studyState", "recordings"]);
+  const sid = sessionId ?? studyState?.sessionId;
+  const events = annotateVideoOffsets((studyState?.events ?? []).filter((e) => e.sessionId === sid));
   if (!events.length) return 0;
-  const base = `grading-study/${String(studyState.participant || "participant").replace(/[^\w-]+/g, "_")}-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}`;
+  const started = events.find((e) => e.type === "session_started");
+  const folder = started?.sessionFolder ?? studyState.sessionFolder ?? `grading-study/grader-${String(studyState.graderId || "unknown").replace(/[^\w-]+/g, "_")}`;
+  const videoFiles = Object.fromEntries(recordings.filter((m) => m.filename).map((m) => [m.id, m.filename.split(/[\\/]/).pop()]));
   const save = async (filename, text, type) => {
     const url = URL.createObjectURL(new Blob([text], { type }));
-    await chrome.downloads.download({ url, filename, conflictAction: "uniquify" });
+    await chrome.downloads.download({ url, filename: `${folder}/${filename}`, conflictAction: "overwrite" });
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   };
   const answers = summarize(events);
-  await save(`${base}-events.json`, JSON.stringify({ schemaVersion: 5, exportedAt: new Date().toISOString(), extensionVersion: chrome.runtime.getManifest().version, events }, null, 2), "application/json");
-  await save(`${base}-answers.csv`, toCsv(answers), "text/csv");
-  await save(`${base}-questions.csv`, toCsv(summarizeByQuestion(answers)), "text/csv");
+  await save("events.json", JSON.stringify({ schemaVersion: 6, exportedAt: new Date().toISOString(), extensionVersion: chrome.runtime.getManifest().version, events }, null, 2), "application/json");
+  await save("answers.csv", toCsv(answers), "text/csv");
+  await save("questions.csv", toCsv(summarizeByQuestion(answers)), "text/csv");
+  await save("visits.csv", toCsv(summarizeVisits(events, videoFiles)), "text/csv");
   return events.length;
 }

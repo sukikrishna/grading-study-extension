@@ -9,12 +9,13 @@
   <body>
     <main>
       <header>
-        <h1>Grading Study Logger</h1>
-        <p class="subtle">Logs Gradescope grading activity automatically. Files are saved to Downloads/grading-study/ when the session ends.</p>
+        <h1>Grading Study Logger <span id="version" class="subtle"></span></h1>
+        <p class="subtle">Use the study bar at the top of any Gradescope grading page to start, pause and end sessions. Files are saved to Downloads/grading-study/ when a session ends.</p>
+        <button id="tutorial" class="wide">How it works (2-minute guide)</button>
       </header>
 
       <section id="setup" class="card">
-        <label>Study participant code <input id="participant" type="text" maxlength="40" autocomplete="off" placeholder="e.g. TF-014"></label>
+        <label>Grader ID <input id="graderId" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="Paste the ID from the study team"></label>
         <p class="subtle">You can also start, pause and end sessions from the study box on any Gradescope grading page, so you don't need this menu while grading.</p>
         <button id="startSession" class="primary wide">Start session</button>
       </section>
@@ -22,6 +23,7 @@
       <section id="active" class="card" hidden>
         <div class="status-row"><span id="status" class="badge">Logging</span><span id="sessionTimer" class="timer">00:00</span></div>
         <dl class="facts">
+          <dt>Grader ID</dt><dd id="graderShown">—</dd>
           <dt>Current answer</dt><dd id="current">—</dd>
           <dt>Answers visited</dt><dd id="seen">0</dd>
           <dt>Screen recording</dt><dd id="recording">Off</dd>
