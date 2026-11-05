@@ -9,7 +9,7 @@ A Chrome extension for collecting data in the **human + AI grading study**. The 
 
 Grading itself works the same as without the extension.
 
-The AI feedback comes from [`claude-grading-assistant`](../claude-grading-assistant). Its Gradescope autograder grades each student answer against the instructor's rubric and posts per-criterion feedback under **Autograder Results** before a human looks at it. This repo is the measurement side of that project.
+The AI feedback comes from [`claude-grading-assistant`](https://github.com/rebeccanesson/claude-grading-assistant). Its Gradescope autograder grades each student answer against the instructor's rubric and posts per-criterion feedback under **Autograder Results** before a human looks at it. This repo is the measurement side of that project.
 
 ---
 
@@ -31,7 +31,7 @@ Student-side measures (perceived fairness, learning from feedback, surveys) and 
 
 ### How grading works in the study
 
-1. The instructor builds the rubric with `claude-grading-assistant`. The autograder runs on every submission.
+1. The instructor builds the rubric with [`claude-grading-assistant`](https://github.com/rebeccanesson/claude-grading-assistant). The autograder runs on every submission.
 2. On Gradescope, each answer shows **Autograder Results**: the AI's feedback as numbered sections such as `2.1 — R — Show Reduction to Sorting (0/0)`.
 3. The TF checks the AI feedback against the student's work and applies a rubric item recording their verdict:
    - **Autograder score and comments are correct**, or
@@ -254,7 +254,7 @@ For each visit to a matching answer, the script cuts that stretch out of the ses
 
 | Setting | Purpose |
 |---|---|
-| `AI_RESULTS_HEADING`, `AI_SECTION_PATTERN`, `AI_BAND_PATTERN`, `AI_NEEDS_REVIEW_PATTERN` | How the AI feedback is recognized; matches `grade.py` test names in `claude-grading-assistant` |
+| `AI_RESULTS_HEADING`, `AI_SECTION_PATTERN`, `AI_BAND_PATTERN`, `AI_NEEDS_REVIEW_PATTERN` | How the AI feedback is recognized; matches `grade.py` test names in [`claude-grading-assistant`](https://github.com/rebeccanesson/claude-grading-assistant) |
 | `QUESTION_TITLE_PATTERN` | How the Gradescope question title ("3.1: Show reduction") is recognized |
 | `RUBRIC_VERDICTS` | Text patterns that put each rubric item into `ai_error` / `ai_correct_with_comments` / `ai_correct` |
 | `GRADER_ID_PATTERN`, `GRADER_IDS` | Grader ID format (UUID by default) and optional list of issued IDs |
