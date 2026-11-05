@@ -114,14 +114,77 @@ The only case with more than one video in a session is when sharing is stopped a
 
 ## 3. Running it
 
-### Install (each grader, once)
+### Test it locally (until the extension is deployed)
 
-1. Get this folder; a zip is fine.
-2. Open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, and choose this folder.
-3. Reload any Gradescope tabs that were already open.
-4. macOS only: allow Chrome under System Settings → Privacy & Security → Screen Recording.
+Until the extension is distributed through the Chrome Web Store or Harvard-managed Chrome, it runs as an "unpacked" extension loaded from a folder on your computer.
 
-After you change the code, click **Reload** on the extension card and reload the Gradescope tab.
+**1. Get the code**
+
+```bash
+git clone git@github.com:sukikrishna/grading-study-extension.git
+```
+
+Or, on GitHub, use **Code → Download ZIP** and unzip it. If you work in WSL but use Chrome on Windows, clone or copy the folder to a Windows location (for example `C:\Users\<you>\grading-study-extension`); Chrome may refuse to load an extension from a `\\wsl.localhost\…` path.
+
+**2. Load it in Chrome**
+
+1. Open `chrome://extensions`.
+2. Turn on **Developer mode** (top right).
+3. Click **Load unpacked** and choose the `grading-study-extension` folder (the one containing `manifest.json`).
+4. Pin **Grading Study Logger** from the puzzle-piece menu so its icon is easy to reach.
+5. macOS only: allow Chrome under System Settings → Privacy & Security → Screen Recording.
+
+The two-minute tutorial opens in a new tab.
+
+**3. Run a test session**
+
+1. Open the test course, [gradescope.com/courses/1422555](https://www.gradescope.com/courses/1422555); reload the tab if it was already open. The study bar appears at the top of the page. It doesn't appear on other courses (see `STUDY_COURSE_IDS`).
+2. In the bar, paste the test grader ID `00000000-0000-4000-8000-000000000001` and click **Start session**.
+3. In the recorder tab that opens, click **Start recording** → **Entire screen** → **Share**. You're switched back to Gradescope.
+4. Open a question and grade a few answers. Try each control:
+   - an **AI use** button, then **Next Ungraded**;
+   - **Next** without choosing AI use, which should be blocked;
+   - **Skip**;
+   - **⏸ Pause** / **▶ Resume**;
+   - **A− / A+**;
+   - minimize **–** and restore **⤢**.
+5. Press **■ End** twice.
+6. Open `Downloads/grading-study/grader-00000000-0000-4000-8000-000000000001/`. There's one folder per session containing `screen-recording.webm`, `visits.csv`, `answers.csv`, `questions.csv` and `events.json`.
+7. Optional: run the analysis scripts on your test data (§5):
+
+   ```bash
+   python3 tools/combine_sessions.py ~/Downloads/grading-study
+   python3 tools/cut_clips.py ~/Downloads/grading-study --dry-run
+   ```
+
+**4. Update after code changes**
+
+1. Pull the latest code (`git pull`) or download and unzip it again into the same folder.
+2. On `chrome://extensions`, click **Reload** (↻) on the Grading Study Logger card.
+3. Reload the Gradescope tab. Pages opened before the reload keep running the old version.
+4. Check the version next to the title in the extension menu.
+
+If you loaded a new copy from a different folder, remove the old card first so only one copy is installed.
+
+**5. Reset test data**
+
+- End the session, then use **Clear logs** in the extension menu. This deletes the logged events and per-answer state stored in the browser. Files already saved to Downloads are untouched.
+- Remove old test recordings from the list in the recorder tab (extension menu → **Open screen recorder**).
+- Delete the `grader-00000000-…` folders from `Downloads/grading-study/`.
+
+**6. When something doesn't work**
+
+- **Extension menu → Calibrate page regions → Check current page** shows:
+  - the version;
+  - whether the bar is showing and the page is in a study course;
+  - what the extension reads from the page;
+  - the last error on the page, if any.
+- `chrome://extensions` → **Errors** on the Grading Study Logger card lists errors from the extension itself.
+- On the Gradescope page, the browser console (F12 → Console) shows messages starting with `[grading study]`.
+
+### Install for graders (pilot)
+
+For a small pilot, graders install the same way as steps 1–2 above, from a zip of this folder. Each grader then needs their own grader ID (see below) in place of the test ID. For a larger rollout, distribute through Harvard-managed Chrome or an unlisted Chrome Web Store listing (§7) so graders don't need Developer mode.
 
 ### Each grading session (grader)
 
