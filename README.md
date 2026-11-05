@@ -52,9 +52,11 @@ Student-side measures (perceived fairness, learning from feedback, surveys) and 
 
 ## 2. What the grader sees and does
 
-### The study bar (top of every Gradescope course page)
+### The study bar (top of the study course's Gradescope pages)
 
-A dark bar pinned to the top center of every Gradescope course page, like a screen-share control bar. It can be dragged by its **⋮⋮** handle and remembers its position, size and minimized state.
+The extension runs only in the study's Gradescope course(s), set by `STUDY_COURSE_IDS` in `config.js` (currently the test course, `gradescope.com/courses/1422555`). On any other course it does nothing: no bar, no timing, no logging, and Next is never blocked.
+
+A dark bar pinned to the top center of every page of the study course, like a screen-share control bar. It can be dragged by its **⋮⋮** handle and remembers its position, size and minimized state.
 
 ```
 ⋮⋮ Grader 3f2a9c1e ● REC │ Q3.1 Show reduction 02:31 Q total 1:12:05 │ AI use? ▸ [Kept as-is] [Edited it] [Didn't use] [Skip ⏭] │ [⏸ Pause] [■ End] [A−][A+][?] [–]
@@ -142,13 +144,14 @@ For trying the extension out, use the test ID `00000000-0000-4000-8000-000000000
 
 ### Before the pilot (research team)
 
-1. On a real grading page with AI feedback, **expand Autograder Results**. Then in the extension menu open **Calibrate page regions** → **Check current page**. It should show:
+1. Set `STUDY_COURSE_IDS` in `config.js` to the study course's ID, the number in its Gradescope URL (`gradescope.com/courses/<ID>`). It's currently the test course, `1422555`. List several IDs if the study spans more than one course.
+2. On a real grading page with AI feedback, **expand Autograder Results**. Then in the extension menu open **Calibrate page regions** → **Check current page**. It should show:
    - the question (e.g. `3.1: Show reduction`);
    - the AI sections (e.g. `1:R, 2.1:R, 2.2:R-`);
    - each rubric item with its points, its verdict category, and whether it is **APPLIED** or off.
 
    If a rubric item shows **state unreadable**, verdicts fall back to replaying clicks. That fallback is correct for first-time grading but not for reopened answers. Send a page sample, and `appliedState()` in `content.js` can be adapted. If a rubric item has **no verdict category**, adjust `RUBRIC_VERDICTS` in `config.js`.
-2. Grade 5–10 mock submissions. Then compare `answers.csv` against the recording for timing, rubric verdicts and AI-use answers.
+3. Grade 5–10 mock submissions. Then compare `answers.csv` against the recording for timing, rubric verdicts and AI-use answers.
 
 ---
 
@@ -156,8 +159,8 @@ For trying the extension out, use the test ID `00000000-0000-4000-8000-000000000
 
 | Problem | Fix |
 |---|---|
-| No study bar on Gradescope | Reload the Gradescope tab after installing or reloading the extension; pages opened earlier don't have the study script. The bar appears on course pages (`gradescope.com/courses/…`) only. |
-| Still no bar | Open the extension menu → **Calibrate page regions** → **Check current page**. The first line shows the extension version and whether the study bar is showing. If the script failed on the page, the last error is shown at the end; send it to the study team. |
+| No study bar on Gradescope | Check that you're in the study course: the bar appears only on courses listed in `STUDY_COURSE_IDS` (`gradescope.com/courses/<ID>/…`). Then reload the Gradescope tab; pages opened before installing or reloading the extension don't have the study script. |
+| Still no bar | Open the extension menu → **Calibrate page regions** → **Check current page**. The first lines show the extension version, whether the study bar is showing, and whether this page's course is a study course. If the script failed on the page, the last error is shown at the end; send it to the study team. |
 | Not sure which version is loaded | The version is next to the title in the extension menu. After pulling a new version, click **Reload** on the extension card in `chrome://extensions`. |
 | Stuck on the recorder tab after sharing | Click your Gradescope tab. The recorder normally switches back automatically. |
 
@@ -257,6 +260,7 @@ For each visit to a matching answer, the script cuts that stretch out of the ses
 | `AI_RESULTS_HEADING`, `AI_SECTION_PATTERN`, `AI_BAND_PATTERN`, `AI_NEEDS_REVIEW_PATTERN` | How the AI feedback is recognized; matches `grade.py` test names in [`claude-grading-assistant`](https://github.com/rebeccanesson/claude-grading-assistant) |
 | `QUESTION_TITLE_PATTERN` | How the Gradescope question title ("3.1: Show reduction") is recognized |
 | `RUBRIC_VERDICTS` | Text patterns that put each rubric item into `ai_error` / `ai_correct_with_comments` / `ai_correct` |
+| `STUDY_COURSE_IDS` | Gradescope course ID(s) the study runs in; the extension is inactive on every other course. Empty list = all courses. |
 | `GRADER_ID_PATTERN`, `GRADER_IDS` | Grader ID format (UUID by default) and optional list of issued IDs |
 | `USAGE_OPTIONS` | The AI-use buttons on the study bar |
 | `REGIONS` | Optional selectors for the rubric and student-submission areas. These can also be set from the extension menu with **Pick**. |
@@ -275,7 +279,7 @@ The idle threshold (120 s) is `IDLE_SECONDS` in `background.js` and `ATTENTION_I
 
 - Tested end to end in Chromium against a mock page modeled on the real Gradescope screens. Screen capture was simulated in that test. Run the pilot steps in §3 on the live site first.
 - Rubric applied/not-applied state is read from the page's accessibility attributes or classes. Confirm it with **Check current page**.
-- Chrome only, `gradescope.com` only. The recorder tab must stay open while recording; it warns before closing.
+- Chrome only, `gradescope.com` only, and only the courses in `STUDY_COURSE_IDS`. The recorder tab must stay open while recording; it warns before closing.
 
 ## Files
 

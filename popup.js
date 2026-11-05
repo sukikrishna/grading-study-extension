@@ -100,7 +100,8 @@ $("probe").addEventListener("click", async () => {
     parts.unshift(`Question: ${result.question ? `${result.question.number}: ${result.question.title}` : "title not found"}`,
       `Autograder Results: ${result.aiResults}`, `AI sections: ${result.sections.length ? result.sections.join(", ") : "none found (expand Autograder Results)"}`);
     const { contentError } = await chrome.storage.local.get("contentError");
-    parts.unshift(`Extension ${chrome.runtime.getManifest().version} · page script ${result.version} · study bar ${result.barShown ? "showing" : "NOT showing"}`);
+    parts.unshift(`Extension ${chrome.runtime.getManifest().version} · page script ${result.version} · study bar ${result.barShown ? "showing" : "NOT showing"}`,
+      result.course ? `Course ${result.course}: ${result.studyCourse ? "study course" : `not a study course (study runs on ${STUDY_COURSE_IDS.join(", ")})`}` : "Not on a course page");
     if (contentError) parts.push(`Last page error (${contentError.at}, ${contentError.where}, v${contentError.version}, ${contentError.page}): ${contentError.message}`);
     parts.push(`Comment boxes: ${result.commentBoxes}`, `Answer: ${result.key ?? "not a grading page"}`, `Rubric items (${rubric.length}):`, ...rubric);
     $("probeResult").textContent = parts.join("\n");

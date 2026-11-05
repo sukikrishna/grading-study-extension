@@ -29,7 +29,8 @@ let pending = [];        // answers left without an AI-use answer by a route the
 let lastEntry = null;    // the answer most recently open
 let leaving = false;     // set when the bar itself sends the grader on, so the leave guard stays quiet
 
-const logging = () => status.active && !status.paused;
+const inStudyCourse = () => Boolean(ctx.ids.course) && isStudyCourse(ctx.ids.course);
+const logging = () => status.active && !status.paused && inStudyCourse();
 function freshAttention() { return { aiVisibleMs: 0, commentFocusMs: 0, scrollPx: 0, hoverMs: {}, sectionHoverMs: {} }; }
 
 function send(type, data = {}) {
@@ -326,7 +327,10 @@ function announce() {
 function checkUrl() {
   if (location.pathname === ctx.path) return;
   flushAttention();
-  ctx = parseContext(); lastSnapshot = ""; cache = {};
+  const next = parseContext();
+  // Leaving the study course within the page: close the open answer before logging goes quiet.
+  if (logging() && !isStudyCourse(next.ids.course)) send("page_context", { key: null, ids: next.ids, path: next.path });
+  ctx = next; lastSnapshot = ""; cache = {};
   if (document.visibilityState === "visible") { send("page_context", { ids: ctx.ids, path: ctx.path }); enterEntry(); }
   renderBar();
 }
@@ -612,7 +616,7 @@ const answerLabel = (key) => {
   const [, q, sub] = key.match(/^q?(\w+)-s(\d+)$/) ?? [];
   return q ? `question ${q}, submission ${sub}` : key;
 };
-const onCoursePage = () => /^\/courses\/\d+/.test(location.pathname);
+const onCoursePage = () => /^\/courses\/\d+/.test(location.pathname) && inStudyCourse();
 function renderBar() { try { drawBar(); } catch (err) { reportError("bar", err); } }
 function drawBar() {
   if (!onCoursePage()) { barHost.remove(); return; }
@@ -746,6 +750,7 @@ function probe() {
   }
   return {
     version: chrome.runtime.getManifest().version, barShown: barHost.isConnected,
+    course: ctx.ids.course ?? null, studyCourse: inStudyCourse(),
     key: ctx.key, question: questionInfo(), regions,
     aiResults: aiResultsBlock() ? (aiExpanded() ? "found, expanded" : "found, collapsed") : "not found",
     sections: aiSections().map(({ id, mark, needsReview }) => (needsReview ? `${id}:needs review` : `${id}:${mark || "?"}`)),

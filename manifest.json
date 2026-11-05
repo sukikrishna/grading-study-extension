@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Grading Study Logger",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Automatically logs Gradescope grading interactions and records the screen for a grading study.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "unlimitedStorage", "idle", "downloads"],

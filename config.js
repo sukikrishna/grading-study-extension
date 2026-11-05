@@ -22,6 +22,12 @@ const AI_SECTION_PATTERN = /^\s*(.{1,40}?)\s+[—–]\s+(.+?)\s*\(\s*([\d.]+)\s*
 const AI_BAND_PATTERN = /^(\S{1,4})\s+[—–]\s+(.+)$/;
 const AI_NEEDS_REVIEW_PATTERN = /needs human review/i;
 
+// Gradescope course(s) the study runs in: the number in the course URL, gradescope.com/courses/<ID>.
+// The study bar, timing, logging and the move-on guard run only on these courses; other courses are
+// left untouched. Leave the list empty to run on every course.
+const STUDY_COURSE_IDS = ["1422555"]; // test course; replace with the study course ID(s)
+const isStudyCourse = (courseId) => !STUDY_COURSE_IDS.length || STUDY_COURSE_IDS.map(String).includes(String(courseId));
+
 // Gradescope's question title in the grading pane, e.g. "3.1: Show reduction".
 const QUESTION_TITLE_PATTERN = /^\s*(\d+(?:\.\d+)*)\s*:\s*(\S.{0,100})$/;
 
